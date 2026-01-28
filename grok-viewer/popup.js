@@ -9,6 +9,12 @@
   const refreshBtn = document.getElementById("refreshBtn");
   const downloadAllBtn = document.getElementById("downloadAllBtn");
   const deleteAllBtn = document.getElementById("deleteAllBtn");
+  const githubBtn = document.getElementById("githubBtn");
+  const purgeBtn = document.getElementById("purgeBtn");
+  const logsBtn = document.getElementById("logsBtn");
+  const logsPanel = document.getElementById("logsPanel");
+  const logsBody = document.getElementById("logsBody");
+  const clearLogsBtn = document.getElementById("clearLogsBtn");
 
   const lightboxEl = document.getElementById("lightbox");
   const lightboxCountEl = document.getElementById("lightboxCount");
@@ -24,8 +30,99 @@
     videos: [],
     selectedIndex: 0,
     favoritesTabId: null,
-    busy: false
+    busy: false,
+    logsOpen: false,
+    lastUpdatedAt: 0,
+    knownUrls: new Set()
   };
+
+  const USE_BLOB_PROXY = false;
+  const blobCache = new Map();
+  const blobPending = new Map();
+
+  let logTimer = null;
+  const logLines = [];
+  const MAX_LOGS = 200;
+
+  const formatTime = (date) =>
+    `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(
+      date.getSeconds()
+    ).padStart(2, "0")}`;
+
+  const addLog = (message) => {
+    const line = `[${formatTime(new Date())}] ${message}`;
+    logLines.push(line);
+    if (logLines.length > MAX_LOGS) {
+      logLines.shift();
+    }
+    if (logsBody) {
+      logsBody.textContent = logLines.join("\n");
+      logsBody.scrollTop = logsBody.scrollHeight;
+    }
+  };
+
+  const isPrivateUrl = (url) => typeof url === "string" && url.includes("assets.grok.com");
+
+  const getBlobUrl = (url) => {
+    if (blobCache.has(url)) return Promise.resolve(blobCache.get(url));
+    if (blobPending.has(url)) return blobPending.get(url);
+    const promise = fetch(url, { credentials: "include" })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.blob();
+      })
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        blobCache.set(url, objectUrl);
+        addLog(`Blob ready: ${url}`);
+        return objectUrl;
+      })
+      .catch((error) => {
+        const message = error && error.message ? error.message : "unknown";
+        addLog(`Blob error (${message}): ${url}`);
+        throw error;
+      })
+      .finally(() => {
+        blobPending.delete(url);
+      });
+    blobPending.set(url, promise);
+    return promise;
+  };
+
+  const clearBlobCache = () => {
+    blobCache.forEach((value) => {
+      URL.revokeObjectURL(value);
+    });
+    blobCache.clear();
+    blobPending.clear();
+  };
+
+  const waitForTabReady = (tabId, timeoutMs = 2500) =>
+    new Promise((resolve) => {
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          resolve(false);
+          return;
+        }
+        if (tab.status === "complete") {
+          resolve(true);
+          return;
+        }
+        const timeout = setTimeout(() => {
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve(false);
+        }, timeoutMs);
+        const listener = (updatedId, info) => {
+          if (updatedId !== tabId || info.status !== "complete") return;
+          clearTimeout(timeout);
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve(true);
+        };
+        chrome.tabs.onUpdated.addListener(listener);
+      });
+    });
 
   const isMp4 = (url) => {
     if (!url || typeof url !== "string") return false;
@@ -298,7 +395,7 @@
             updatedAt: Date.now()
           }
         },
-        () => updateVideos(filtered)
+        () => updateVideos(filtered, Date.now())
       );
     });
   };
@@ -308,16 +405,45 @@
       const tab = tabs && tabs.length ? tabs[0] : null;
       state.favoritesTabId = tab ? tab.id : null;
       if (!state.favoritesTabId) {
+        addLog("Favorites tab not found");
         callback({ ok: false, error: "no-tab" });
         return;
       }
-      chrome.tabs.sendMessage(state.favoritesTabId, message, (response) => {
-        if (chrome.runtime.lastError) {
-          callback({ ok: false, error: chrome.runtime.lastError.message });
-          return;
-        }
-        callback({ ok: true, response });
-      });
+      const trySend = (attempt, injected) => {
+        chrome.tabs.sendMessage(state.favoritesTabId, message, (response) => {
+          if (!chrome.runtime.lastError) {
+            addLog(`Message ok: ${message.action || "unknown"}`);
+            callback({ ok: true, response });
+            return;
+          }
+          const err = chrome.runtime.lastError.message || "";
+          addLog(`Message error: ${err}`);
+          const needsInject =
+            !injected &&
+            (err.includes("Receiving end does not exist") ||
+              err.includes("Could not establish connection") ||
+              err.includes("The message port closed"));
+          if (needsInject && chrome.scripting && chrome.scripting.executeScript) {
+            addLog("Injecting favorites listener...");
+            chrome.scripting.executeScript(
+              {
+                target: { tabId: state.favoritesTabId },
+                files: ["favorites.js"]
+              },
+              () => {
+                setTimeout(() => trySend(attempt + 1, true), 200);
+              }
+            );
+            return;
+          }
+          if (attempt > 0) {
+            callback({ ok: false, error: err });
+            return;
+          }
+          setTimeout(() => trySend(attempt + 1, injected), 300);
+        });
+      };
+      waitForTabReady(state.favoritesTabId).finally(() => trySend(0, false));
     });
   };
 
@@ -394,6 +520,8 @@
       thumb.dataset.index = String(index);
 
       const video = document.createElement("video");
+      video.crossOrigin = "use-credentials";
+      video.setAttribute("crossorigin", "use-credentials");
       video.muted = true;
       video.playsInline = true;
       video.preload = "metadata";
@@ -403,7 +531,33 @@
       if (item.poster) {
         video.poster = item.poster;
       }
-      video.src = item.url;
+      if (isPrivateUrl(item.url) && USE_BLOB_PROXY) {
+        video.dataset.originalSrc = item.url;
+        getBlobUrl(item.url)
+          .then((blobUrl) => {
+            if (video.dataset.originalSrc !== item.url) return;
+            video.src = blobUrl;
+            video.load();
+            const playPromise = video.play();
+            if (playPromise && typeof playPromise.catch === "function") {
+              playPromise.catch(() => {});
+            }
+          })
+          .catch(() => {});
+      } else {
+        video.src = item.url;
+      }
+      video.addEventListener(
+        "loadeddata",
+        () => {
+          addLog(`Thumb loaded: ${item.url}`);
+        },
+        { once: true }
+      );
+      video.addEventListener("error", () => {
+        const code = video.error ? video.error.code : "unknown";
+        addLog(`Thumb error (${code}): ${item.url}`);
+      });
 
       const overlay = document.createElement("div");
       overlay.className = "thumb-overlay";
@@ -453,13 +607,37 @@
     if (!item) return;
 
     playerEl.pause();
-    playerEl.src = item.url;
     playerEl.loop = true;
-    playerEl.load();
-    const playPromise = playerEl.play();
-    if (playPromise && typeof playPromise.catch === "function") {
-      playPromise.catch(() => {});
+    playerEl.crossOrigin = "use-credentials";
+    playerEl.setAttribute("crossorigin", "use-credentials");
+    if (isPrivateUrl(item.url) && USE_BLOB_PROXY) {
+      playerEl.dataset.originalSrc = item.url;
+      getBlobUrl(item.url)
+        .then((blobUrl) => {
+          if (playerEl.dataset.originalSrc !== item.url) return;
+          playerEl.src = blobUrl;
+          playerEl.load();
+          const playPromise = playerEl.play();
+          if (playPromise && typeof playPromise.catch === "function") {
+            playPromise.catch(() => {});
+          }
+        })
+        .catch(() => {});
+    } else {
+      playerEl.src = item.url;
+      playerEl.load();
+      const playPromise = playerEl.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {});
+      }
     }
+    playerEl.onloadeddata = () => {
+      addLog(`Player loaded: ${item.url}`);
+    };
+    playerEl.onerror = () => {
+      const code = playerEl.error ? playerEl.error.code : "unknown";
+      addLog(`Player error (${code}): ${item.url}`);
+    };
     updateCount();
     updateActionButtons();
   };
@@ -485,8 +663,21 @@
     loadPlayer();
   };
 
-  const updateVideos = (items) => {
+  const updateVideos = (items, updatedAt = Date.now()) => {
     state.videos = normalizeItems(items);
+    state.lastUpdatedAt = updatedAt || Date.now();
+    const nextUrls = new Set(state.videos.map((item) => item.url));
+    nextUrls.forEach((url) => {
+      if (!state.knownUrls.has(url)) {
+        addLog(`New video: ${url}`);
+      }
+    });
+    state.knownUrls.forEach((url) => {
+      if (!nextUrls.has(url)) {
+        addLog(`Removed video: ${url}`);
+      }
+    });
+    state.knownUrls = nextUrls;
     if (!state.videos.length) {
       setStatus("No videos yet. Keep favorites open.");
     } else {
@@ -503,8 +694,10 @@
 
   const loadFromStorage = () => {
     chrome.storage.local.get(STORAGE_KEY, (data) => {
-      const items = data && data[STORAGE_KEY] ? data[STORAGE_KEY].items : [];
-      updateVideos(items || []);
+      const payload = data && data[STORAGE_KEY] ? data[STORAGE_KEY] : null;
+      const items = payload ? payload.items : [];
+      updateVideos(items || [], payload ? payload.updatedAt : Date.now());
+      addLog(`Storage loaded: ${items ? items.length : 0} videos`);
     });
   };
 
@@ -522,27 +715,90 @@
   };
 
   const refreshFromFavorites = () => {
-    chrome.tabs.query({ url: `${FAVORITES_URL}*` }, (tabs) => {
-      const tab = tabs && tabs.length ? tabs[0] : null;
-      state.favoritesTabId = tab ? tab.id : null;
-      if (!state.favoritesTabId) {
-        setStatus("Open Grok favorites to refresh.");
+    setStatus("Refreshing favorites...");
+    addLog("Refresh requested");
+    sendToFavorites({ action: "grokViewerRefresh" }, (result) => {
+      if (!result.ok) {
+        setStatus("Refresh failed. Keep favorites open.");
+        addLog(`Refresh failed: ${result.error || "unknown"}`);
         return;
       }
-      setStatus("Refreshing favorites...");
-      chrome.tabs.sendMessage(state.favoritesTabId, { action: "grokViewerRefresh" }, () => {
-        if (chrome.runtime.lastError) {
-          setStatus("Refresh failed. Keep favorites open.");
-          return;
-        }
-        loadFromStorage();
-      });
+      addLog("Refresh completed");
+      loadFromStorage();
+    });
+  };
+
+  const startLogTimer = () => {
+    if (logTimer) return;
+    logTimer = setInterval(() => {
+      if (!state.logsOpen) return;
+      const last = state.lastUpdatedAt
+        ? new Date(state.lastUpdatedAt).toLocaleTimeString()
+        : "never";
+      addLog(`Tick • videos=${state.videos.length} • updated=${last}`);
+    }, 1000);
+  };
+
+  const stopLogTimer = () => {
+    if (!logTimer) return;
+    clearInterval(logTimer);
+    logTimer = null;
+  };
+
+  const toggleLogs = () => {
+    state.logsOpen = !state.logsOpen;
+    if (logsPanel) {
+      logsPanel.classList.toggle("show", state.logsOpen);
+    }
+    if (state.logsOpen) {
+      startLogTimer();
+      addLog("Logs opened");
+    } else {
+      stopLogTimer();
+    }
+  };
+
+  const purgeCache = () => {
+    if (!window.confirm("Purge cached list? This won't delete downloaded files.")) return;
+    chrome.storage.local.remove(STORAGE_KEY, () => {
+      state.videos = [];
+      clearBlobCache();
+      updateVideos([], Date.now());
+      addLog("Cache purged");
+      refreshFromFavorites();
     });
   };
 
   const bindEvents = () => {
     if (refreshBtn) {
       refreshBtn.addEventListener("click", refreshFromFavorites);
+    }
+
+    if (githubBtn) {
+      githubBtn.addEventListener("click", () => {
+        const url = "https://github.com/exaabet/grok-viewer";
+        if (chrome.tabs && chrome.tabs.create) {
+          chrome.tabs.create({ url });
+        } else {
+          window.open(url, "_blank", "noopener");
+        }
+      });
+    }
+
+    if (logsBtn) {
+      logsBtn.addEventListener("click", toggleLogs);
+    }
+
+    if (clearLogsBtn) {
+      clearLogsBtn.addEventListener("click", () => {
+        logLines.length = 0;
+        if (logsBody) logsBody.textContent = "";
+        addLog("Logs cleared");
+      });
+    }
+
+    if (purgeBtn) {
+      purgeBtn.addEventListener("click", purgeCache);
     }
 
     if (downloadAllBtn) {
@@ -619,7 +875,9 @@
 
     chrome.storage.onChanged.addListener((changes) => {
       if (changes[STORAGE_KEY] && changes[STORAGE_KEY].newValue) {
-        updateVideos(changes[STORAGE_KEY].newValue.items || []);
+        const payload = changes[STORAGE_KEY].newValue;
+        updateVideos(payload.items || [], payload.updatedAt);
+        addLog(`Storage changed: ${payload.items ? payload.items.length : 0} videos`);
       }
     });
   };

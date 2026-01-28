@@ -364,6 +364,13 @@
       color: var(--text);
     }
 
+    .lightbox-actions .ghost.active {
+      background: rgba(109, 232, 255, 0.16);
+      border-color: rgba(109, 232, 255, 0.6);
+      color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(109, 232, 255, 0.18);
+    }
+
     .lightbox-actions .ghost.danger {
       color: #ffd6d6;
       border-color: rgba(255, 107, 107, 0.4);
@@ -483,6 +490,7 @@
         <div class="lightbox-actions">
           <button id="downloadBtn" class="ghost" type="button">Download</button>
           <button id="deleteBtn" class="ghost danger" type="button">Delete</button>
+          <button id="autoNextBtn" class="ghost" type="button">Autoplay</button>
           <button id="fullscreenBtn" class="ghost" type="button">Fullscreen</button>
           <button id="closeBtn" class="ghost" type="button">Close</button>
         </div>

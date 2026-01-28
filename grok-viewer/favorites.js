@@ -61,11 +61,11 @@
     if (!post) return null;
     const rawUrl = post.hdMediaUrl || post.mediaUrl || "";
     const url = normalizeUrl(rawUrl);
-    if (!url || !isMp4(url, post.mimeType)) return null;
     const poster = normalizeUrl(post.thumbnailImageUrl || post.previewImageUrl || "");
     const postId = getPostId(post);
     const videoId = getVideoId(post);
     const hdMediaUrl = normalizeUrl(post.hdMediaUrl || "");
+    if (!url || !isMp4(url, post.mimeType)) return null;
     const id = post.id || post.videoPostId || url;
     return {
       id,

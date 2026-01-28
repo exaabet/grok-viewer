@@ -9,6 +9,7 @@ The extension works using your active Grok session and focuses only on video con
 Basic controls include refresh, video playback, and video management actions such as downloading and deleting videos.
 
 <img width="1312" height="932" alt="Image" src="https://github.com/user-attachments/assets/bb83c839-2212-4dba-b440-fe5c52b63e38" />
+
 **Installation:**  
 **Clone or download the repository.**  
 **Open Chrome and navigate to chrome://extensions.**  

@@ -1,3 +1,4 @@
+<img width="1312" height="932" alt="Image" src="https://github.com/user-attachments/assets/57b6676c-c00a-431c-959c-c22d56096d39" />
 Grok Viewer is a simple Chrome extension for viewing and managing MP4 videos generated on Grok Imagine.
 
 It shows new videos as soon as they are created and loads all existing videos from the Grok Favorites page. Videos are displayed in a clean grid with a lightbox player and keyboard navigation.

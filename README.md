@@ -7,7 +7,7 @@ The extension works using your active Grok session and focuses only on video con
 
 Basic controls include refresh, video playback, and video management actions such as downloading and deleting videos.
 
-**Installation**  
+**Installation:**  
 **Clone or download the repository.**  
 **Open Chrome and navigate to chrome://extensions.**  
 **Enable Developer Mode.**  
